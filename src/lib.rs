@@ -1,4 +1,4 @@
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::error::Error;
 use std::path::Path;
 
@@ -28,6 +28,14 @@ pub fn load_lines_from<P: AsRef<Path>>(path: P) -> Result<Vec<String>, Box<dyn E
         lines()
         .filter_map(|line| line.ok())
         .collect())
+}
+
+pub fn load_file<P: AsRef<Path>>(path: P) -> Result<String, Box<dyn Error>> {
+    let file = std::fs::File::open(path)?;
+    let mut buf_reader = std::io::BufReader::new(file);
+    let mut result = String::new();
+    buf_reader.read_to_string(&mut result)?;
+    Ok(result)
 }
 
 #[cfg(test)]
