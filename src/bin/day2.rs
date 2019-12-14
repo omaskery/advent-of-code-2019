@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn can_execute_halt() {
         let mut memory = SimpleMemory::from_literal(&[99]);
-        let mut computer = Computer::new(&mut memory).unwrap();
+        let mut computer = Computer::new(&mut memory);
         assert_eq!(computer.halted, false);
         computer.step().unwrap();
         assert_eq!(computer.instruction_pointer, 0);
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn can_execute_add() {
         let mut memory = SimpleMemory::from_literal(&[1, 4, 5, 6, 10, 22, 3]);
-        let mut computer = Computer::new(&mut memory).unwrap();
+        let mut computer = Computer::new(&mut memory);
         computer.step().unwrap();
         assert_eq!(computer.instruction_pointer, 4);
         assert_eq!(computer.memory.read_slot(6), Ok(32));
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn can_execute_multiply() {
         let mut memory = SimpleMemory::from_literal(&[2, 4, 5, 6, 10, 22, 3]);
-        let mut computer = Computer::new(&mut memory).unwrap();
+        let mut computer = Computer::new(&mut memory);
         computer.step().unwrap();
         assert_eq!(computer.instruction_pointer, 4);
         assert_eq!(computer.memory.read_slot(6), Ok(220));
@@ -312,7 +312,7 @@ mod tests {
             99,
             10, 22, 3
         ]);
-        let mut computer = Computer::new(&mut memory).unwrap();
+        let mut computer = Computer::new(&mut memory);
         computer.step().unwrap();
         assert_eq!(computer.instruction_pointer, 4);
         assert_eq!(computer.memory.read_slot(11), Ok(32));
@@ -353,7 +353,7 @@ mod tests {
 
     fn verify_computer_program<F: Fn(&Computer<SimpleMemory>) -> bool>(initial_memory: &[i32], goal_memory: &[i32], stop_predicate: F) {
         let mut memory = SimpleMemory::from_literal(initial_memory);
-        let mut computer = Computer::new(&mut memory).unwrap();
+        let mut computer = Computer::new(&mut memory);
         while !stop_predicate(&computer) {
             computer.step().unwrap();
         }
