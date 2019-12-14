@@ -2,6 +2,8 @@ use std::io::{BufRead, Read};
 use std::error::Error;
 use std::path::Path;
 
+pub mod intcode;
+
 pub fn fuel_for_mass(mass: i32) -> i32 {
     (mass / 3) - 2
 }
