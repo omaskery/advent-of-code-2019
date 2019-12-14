@@ -11,5 +11,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         computer.step().compat()?;
     }
 
+    println!("IO record:");
+    for event in computer.io_record.iter() {
+        println!("  {:?}", event);
+    }
+
     Ok(())
 }

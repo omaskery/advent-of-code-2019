@@ -230,11 +230,18 @@ impl Instruction {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RecordedIO {
+    UserInput(MemoryValue),
+    Output(MemoryValue),
+}
+
 pub struct Computer<'a, M: Memory> {
     instruction_pointer: Address,
     cycle_count: usize,
     pub halted: bool,
     memory: &'a mut M,
+    pub io_record: Vec<RecordedIO>,
 }
 
 impl<'a, M: Memory> Computer<'a, M> {
@@ -244,6 +251,7 @@ impl<'a, M: Memory> Computer<'a, M> {
             cycle_count: 0,
             halted: false,
             memory,
+            io_record: Vec::new(),
         }
     }
 
@@ -280,12 +288,13 @@ impl<'a, M: Memory> Computer<'a, M> {
                 user_input = user_input.trim().into();
                 let value = user_input.parse::<MemoryValue>()
                     .map_err(|_| ComputerError::FailedToGetInput)?;
-                println!("  (as value: {})", value);
+                self.io_record.push(RecordedIO::UserInput(value));
                 self.perform_write(destination, value)?;
                 2
             },
             Instruction::Output(source) => {
                 let value = self.perform_read(source)?;
+                self.io_record.push(RecordedIO::Output(value));
                 println!("  OUTPUT VALUE: {}", value);
                 2
             },
