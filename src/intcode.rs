@@ -109,6 +109,10 @@ pub enum Opcode {
     Multiply,
     Input,
     Output,
+    JumpIfTrue,
+    JumpIfFalse,
+    LessThan,
+    Equal,
     Halt,
 }
 
@@ -119,6 +123,10 @@ impl Opcode {
             2 => Ok(Opcode::Multiply),
             3 => Ok(Opcode::Input),
             4 => Ok(Opcode::Output),
+            5 => Ok(Opcode::JumpIfTrue),
+            6 => Ok(Opcode::JumpIfFalse),
+            7 => Ok(Opcode::LessThan),
+            8 => Ok(Opcode::Equal),
             99 => Ok(Opcode::Halt),
             _ => Err(ComputerError::UnknownOpcode),
         }
@@ -171,11 +179,16 @@ pub enum Instruction {
     Multiply(Parameter, Parameter, Parameter),
     Input(Parameter),
     Output(Parameter),
+    JumpIfTrue(Parameter, Parameter),
+    JumpIfFalse(Parameter, Parameter),
+    LessThan(Parameter, Parameter, Parameter),
+    Equal(Parameter, Parameter, Parameter),
     Halt,
 }
 
-pub struct ExecuteResult {
-    advance_by: Address,
+pub enum ExecuteResult {
+    AdvanceBy(Address),
+    JumpTo(Address),
 }
 
 impl Instruction {
@@ -212,6 +225,36 @@ impl Instruction {
                 let parameters = header.wrap_parameters(instruction_stream, 1)?;
                 Instruction::Output(
                     parameters[0]
+                )
+            },
+            InstructionHeader { opcode: Opcode::JumpIfTrue, .. } => {
+                let parameters = header.wrap_parameters(instruction_stream, 2)?;
+                Instruction::JumpIfTrue(
+                    parameters[0],
+                    parameters[1]
+                )
+            },
+            InstructionHeader { opcode: Opcode::JumpIfFalse, .. } => {
+                let parameters = header.wrap_parameters(instruction_stream, 2)?;
+                Instruction::JumpIfFalse(
+                    parameters[0],
+                    parameters[1]
+                )
+            },
+            InstructionHeader { opcode: Opcode::LessThan, .. } => {
+                let parameters = header.wrap_parameters(instruction_stream, 3)?;
+                Instruction::LessThan(
+                    parameters[0],
+                    parameters[1],
+                    parameters[2]
+                )
+            },
+            InstructionHeader { opcode: Opcode::Equal, .. } => {
+                let parameters = header.wrap_parameters(instruction_stream, 3)?;
+                Instruction::Equal(
+                    parameters[0],
+                    parameters[1],
+                    parameters[2]
                 )
             },
             InstructionHeader { opcode: Opcode::Halt, .. } => Instruction::Halt,
@@ -255,6 +298,13 @@ impl<'a, M: Memory> Computer<'a, M> {
         }
     }
 
+    pub fn run_until_halted(&mut self) -> Result<(), ComputerError> {
+        while !self.halted {
+            self.step()?;
+        }
+        Ok(())
+    }
+
     pub fn step(&mut self) -> Result<(), ComputerError> {
         println!("[{}] executing at slot {}", self.cycle_count, self.instruction_pointer);
         let instruction = {
@@ -263,22 +313,31 @@ impl<'a, M: Memory> Computer<'a, M> {
         };
         println!("  decoded: {:?}", instruction);
         let result = self.execute(instruction)?;
-        println!("  advancing by {}", result.advance_by);
-        self.instruction_pointer += result.advance_by;
+        match result {
+            ExecuteResult::AdvanceBy(amount) => {
+                println!("  advancing by {}", amount);
+                self.instruction_pointer += amount;
+            },
+            ExecuteResult::JumpTo(address) => {
+                println!("  jumping to {}", address);
+                self.instruction_pointer = address;
+            },
+        }
         self.cycle_count += 1;
         Ok(())
     }
 
     fn execute(&mut self, instruction: Instruction) -> Result<ExecuteResult, ComputerError> {
-        let advance_by = match instruction {
+        Ok(match instruction {
             Instruction::Add(a, b, result) => {
                 self.perform_write(result, self.perform_read(a)? + self.perform_read(b)?)?;
-                4
+                ExecuteResult::AdvanceBy(4)
             },
             Instruction::Multiply(a, b, result) => {
                 self.perform_write(result, self.perform_read(a)? * self.perform_read(b)?)?;
-                4
+                ExecuteResult::AdvanceBy(4)
             },
+
             Instruction::Input(destination) => {
                 let mut user_input = String::new();
                 print!("  INPUT> ");
@@ -290,22 +349,53 @@ impl<'a, M: Memory> Computer<'a, M> {
                     .map_err(|_| ComputerError::FailedToGetInput)?;
                 self.io_record.push(RecordedIO::UserInput(value));
                 self.perform_write(destination, value)?;
-                2
+                ExecuteResult::AdvanceBy(2)
             },
             Instruction::Output(source) => {
                 let value = self.perform_read(source)?;
                 self.io_record.push(RecordedIO::Output(value));
                 println!("  OUTPUT VALUE: {}", value);
-                2
+                ExecuteResult::AdvanceBy(2)
             },
+
+            Instruction::JumpIfTrue(condition, destination) => {
+                if self.perform_read(condition)? != 0 {
+                    ExecuteResult::JumpTo(self.perform_read(destination)? as Address)
+                } else {
+                    ExecuteResult::AdvanceBy(3)
+                }
+            },
+            Instruction::JumpIfFalse(condition, destination) => {
+                if self.perform_read(condition)? == 0 {
+                    ExecuteResult::JumpTo(self.perform_read(destination)? as Address)
+                } else {
+                    ExecuteResult::AdvanceBy(3)
+                }
+            },
+
+            Instruction::LessThan(a, b, result) => {
+                let outcome = if self.perform_read(a)? < self.perform_read(b)? {
+                    1
+                } else {
+                    0
+                };
+                self.perform_write(result, outcome)?;
+                ExecuteResult::AdvanceBy(4)
+            },
+            Instruction::Equal(a, b, result) => {
+                let outcome = if self.perform_read(a)? == self.perform_read(b)? {
+                    1
+                } else {
+                    0
+                };
+                self.perform_write(result, outcome)?;
+                ExecuteResult::AdvanceBy(4)
+            },
+
             Instruction::Halt => {
                 self.halted = true;
-                0
+                ExecuteResult::AdvanceBy(1)
             },
-        };
-
-        Ok(ExecuteResult {
-            advance_by,
         })
     }
 
@@ -379,6 +469,80 @@ mod tests {
     }
 
     #[test]
+    fn can_decode_input() {
+        let memory = SimpleMemory::from_literal(&[3, 4]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::Input(
+            Parameter::Position(4)
+        )));
+    }
+
+    #[test]
+    fn can_decode_output() {
+        let memory = SimpleMemory::from_literal(&[4, 10]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::Output(
+            Parameter::Position(10)
+        )));
+    }
+
+    #[test]
+    fn can_decode_jump_if_true() {
+        let memory = SimpleMemory::from_literal(&[5, 4, 8]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::JumpIfTrue(
+            Parameter::Position(4),
+            Parameter::Position(8)
+        )));
+    }
+
+    #[test]
+    fn can_decode_jump_if_false() {
+        let memory = SimpleMemory::from_literal(&[6, 4, 8]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::JumpIfFalse(
+            Parameter::Position(4),
+            Parameter::Position(8)
+        )));
+    }
+
+    #[test]
+    fn can_decode_less_than() {
+        let memory = SimpleMemory::from_literal(&[7, 4, 8, 10]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::LessThan(
+            Parameter::Position(4),
+            Parameter::Position(8),
+            Parameter::Position(10)
+        )));
+    }
+
+    #[test]
+    fn can_decode_equal() {
+        let memory = SimpleMemory::from_literal(&[8, 4, 8, 10]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::Equal(
+            Parameter::Position(4),
+            Parameter::Position(8),
+            Parameter::Position(10)
+        )));
+    }
+
+    #[test]
+    fn can_decode_halt() {
+        let memory = SimpleMemory::from_literal(&[99]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::Halt));
+    }
+
+    #[test]
     fn validate_position_and_immediate_parameters() {
         let memory = SimpleMemory::from_literal(&[101, 2, 3, 4]);
         let mut stream = memory.read_stream_from(0).unwrap();
@@ -418,28 +582,10 @@ mod tests {
     }
 
     #[test]
-    fn can_decode_halt() {
-        let memory = SimpleMemory::from_literal(&[99]);
-        let mut stream = memory.read_stream_from(0).unwrap();
-        let result = Instruction::decode(&mut stream);
-        assert_eq!(result, Ok(Instruction::Halt));
-    }
-
-    #[test]
-    fn can_execute_halt() {
-        let mut memory = SimpleMemory::from_literal(&[99]);
-        let mut computer = Computer::new(&mut memory);
-        assert_eq!(computer.halted, false);
-        computer.step().unwrap();
-        assert_eq!(computer.instruction_pointer, 0);
-        assert!(computer.halted);
-    }
-
-    #[test]
     fn can_execute_add() {
         let mut memory = SimpleMemory::from_literal(&[1, 4, 5, 6, 10, 22, 3]);
         let mut computer = Computer::new(&mut memory);
-        computer.step().unwrap();
+        computer.step().expect("failed to step computer");
         assert_eq!(computer.instruction_pointer, 4);
         assert_eq!(computer.memory.read_slot(6), Ok(32));
     }
@@ -448,9 +594,75 @@ mod tests {
     fn can_execute_multiply() {
         let mut memory = SimpleMemory::from_literal(&[2, 4, 5, 6, 10, 22, 3]);
         let mut computer = Computer::new(&mut memory);
-        computer.step().unwrap();
+        computer.step().expect("failed to step computer");
         assert_eq!(computer.instruction_pointer, 4);
         assert_eq!(computer.memory.read_slot(6), Ok(220));
+    }
+
+    #[test]
+    fn can_execute_jump_if_true() {
+        let mut memory = SimpleMemory::from_literal(&[1105, 0, 4, 99, 99]);
+        let mut computer = Computer::new(&mut memory);
+        computer.step().expect("failed to step computer");
+        assert_eq!(computer.instruction_pointer, 3);
+
+        let mut memory = SimpleMemory::from_literal(&[1105, 1, 4, 99, 99]);
+        let mut computer = Computer::new(&mut memory);
+        computer.step().expect("failed to step computer");
+        assert_eq!(computer.instruction_pointer, 4);
+    }
+
+    #[test]
+    fn can_execute_jump_if_false() {
+        let mut memory = SimpleMemory::from_literal(&[1106, 0, 4, 99, 99]);
+        let mut computer = Computer::new(&mut memory);
+        computer.step().expect("failed to step computer");
+        assert_eq!(computer.instruction_pointer, 4);
+
+        let mut memory = SimpleMemory::from_literal(&[1106, 1, 4, 99, 99]);
+        let mut computer = Computer::new(&mut memory);
+        computer.step().expect("failed to step computer");
+        assert_eq!(computer.instruction_pointer, 3);
+    }
+
+    #[test]
+    fn can_execute_less_than() {
+        let mut memory = SimpleMemory::from_literal(&[1107, 1, 2, 4, 99]);
+        let mut computer = Computer::new(&mut memory);
+        computer.step().expect("failed to step computer");
+        assert_eq!(computer.instruction_pointer, 4);
+        assert_eq!(memory.read_slot(4).unwrap(), 1);
+
+        let mut memory = SimpleMemory::from_literal(&[1107, 1, 1, 4, 99]);
+        let mut computer = Computer::new(&mut memory);
+        computer.step().expect("failed to step computer");
+        assert_eq!(computer.instruction_pointer, 4);
+        assert_eq!(memory.read_slot(4).unwrap(), 0);
+    }
+
+    #[test]
+    fn can_execute_equal() {
+        let mut memory = SimpleMemory::from_literal(&[1108, 1, 2, 4, 99]);
+        let mut computer = Computer::new(&mut memory);
+        computer.step().expect("failed to step computer");
+        assert_eq!(computer.instruction_pointer, 4);
+        assert_eq!(memory.read_slot(4).unwrap(), 0);
+
+        let mut memory = SimpleMemory::from_literal(&[1108, 1, 1, 4, 99]);
+        let mut computer = Computer::new(&mut memory);
+        computer.step().expect("failed to step computer");
+        assert_eq!(computer.instruction_pointer, 4);
+        assert_eq!(memory.read_slot(4).unwrap(), 1);
+    }
+
+    #[test]
+    fn can_execute_halt() {
+        let mut memory = SimpleMemory::from_literal(&[99]);
+        let mut computer = Computer::new(&mut memory);
+        assert_eq!(computer.halted, false);
+        computer.step().expect("failed to step computer");
+        assert_eq!(computer.instruction_pointer, 1);
+        assert!(computer.halted);
     }
 
     #[test]
@@ -462,14 +674,14 @@ mod tests {
             10, 22, 3
         ]);
         let mut computer = Computer::new(&mut memory);
-        computer.step().unwrap();
+        computer.step().expect("failed to step computer");
         assert_eq!(computer.instruction_pointer, 4);
         assert_eq!(computer.memory.read_slot(11), Ok(32));
-        computer.step().unwrap();
+        computer.step().expect("failed to step computer");
         assert_eq!(computer.instruction_pointer, 8);
         assert_eq!(computer.memory.read_slot(11), Ok(320));
-        computer.step().unwrap();
-        assert_eq!(computer.instruction_pointer, 8);
+        computer.step().expect("failed to step computer");
+        assert_eq!(computer.instruction_pointer, 9);
         assert!(computer.halted);
     }
 
