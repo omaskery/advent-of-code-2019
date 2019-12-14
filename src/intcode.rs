@@ -2,6 +2,10 @@ use failure::Fail;
 use std::path::Path;
 use crate::load_file;
 use std::error::Error;
+use std::io::{stdin, stdout, Write};
+
+type Address = usize;
+type MemoryValue = i32;
 
 #[derive(Copy, Clone, Debug, Fail, Eq, PartialEq)]
 pub enum ComputerError {
@@ -11,20 +15,26 @@ pub enum ComputerError {
     InstructionDecodeFailed,
     #[fail(display = "attempted to interact with memory with an invalid address")]
     MemoryOperationOutOfBounds,
+    #[fail(display = "unknown parameter mode")]
+    UnknownParameterMode,
+    #[fail(display = "parameter specifying a destination address was flagged as immediate mode")]
+    WriteParameterCannotBeImmediateMode,
+    #[fail(display = "IO error while attempting to read from input")]
+    FailedToGetInput,
 }
 
 pub trait Memory {
-    fn read_slot(&self, slot: usize) -> Result<i32, ComputerError>;
-    fn write_slot(&mut self, slot: usize, value: i32) -> Result<(), ComputerError>;
-    fn read_stream_from<'a>(&'a self, slot: usize) -> Result<Box<dyn Iterator<Item=i32> + 'a>, ComputerError>;
+    fn read_slot(&self, slot: Address) -> Result<MemoryValue, ComputerError>;
+    fn write_slot(&mut self, slot: Address, value: MemoryValue) -> Result<(), ComputerError>;
+    fn read_stream_from<'a>(&'a self, slot: Address) -> Result<Box<dyn Iterator<Item=MemoryValue> + 'a>, ComputerError>;
 }
 
 pub struct SimpleMemory {
-    memory: Vec<i32>,
+    memory: Vec<MemoryValue>,
 }
 
 impl SimpleMemory {
-    pub fn from_literal(memory: &[i32]) -> SimpleMemory {
+    pub fn from_literal(memory: &[MemoryValue]) -> SimpleMemory {
         SimpleMemory {
             memory: Vec::from(memory),
         }
@@ -35,12 +45,12 @@ impl SimpleMemory {
 
         Ok(SimpleMemory {
             memory: memory_file_contents.split(",")
-                .filter_map(|value| value.parse::<i32>().ok())
+                .filter_map(|value| value.parse::<MemoryValue>().ok())
                 .collect(),
         })
     }
 
-    pub fn validate_slot(&self, slot: usize) -> Result<(), ComputerError> {
+    pub fn validate_slot(&self, slot: Address) -> Result<(), ComputerError> {
         if slot >= self.memory.len() {
             Err(ComputerError::MemoryOperationOutOfBounds)
         } else {
@@ -50,21 +60,46 @@ impl SimpleMemory {
 }
 
 impl Memory for SimpleMemory {
-    fn read_slot(&self, slot: usize) -> Result<i32, ComputerError> {
+    fn read_slot(&self, slot: Address) -> Result<MemoryValue, ComputerError> {
         self.validate_slot(slot)?;
         Ok(self.memory[slot])
     }
 
-    fn write_slot(&mut self, slot: usize, value: i32) -> Result<(), ComputerError> {
+    fn write_slot(&mut self, slot: Address, value: MemoryValue) -> Result<(), ComputerError> {
         self.validate_slot(slot)?;
         self.memory[slot] = value;
         println!("  write [{}] = {}", slot, value);
         Ok(())
     }
 
-    fn read_stream_from<'a>(&'a self, slot: usize) -> Result<Box<dyn Iterator<Item=i32> + 'a>, ComputerError> {
+    fn read_stream_from<'a>(&'a self, slot: Address) -> Result<Box<dyn Iterator<Item=MemoryValue> + 'a>, ComputerError> {
         self.validate_slot(slot)?;
         Ok(Box::new(self.memory[slot..].iter().cloned()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParameterMode {
+    Position,
+    Immediate,
+}
+
+impl ParameterMode {
+    pub fn decode(raw: MemoryValue) -> Result<ParameterMode, ComputerError> {
+        match raw % 10 {
+            0 => Ok(ParameterMode::Position),
+            1 => Ok(ParameterMode::Immediate),
+            _ => Err(ComputerError::UnknownParameterMode),
+        }
+    }
+
+    pub fn decode_all(mut raw: MemoryValue) -> Result<Vec<ParameterMode>, ComputerError> {
+        let mut modes = Vec::new();
+        while raw > 0 {
+            modes.push(ParameterMode::decode(raw)?);
+            raw /= 10;
+        }
+        Ok(modes)
     }
 }
 
@@ -72,54 +107,120 @@ impl Memory for SimpleMemory {
 pub enum Opcode {
     Add,
     Multiply,
+    Input,
+    Output,
     Halt,
 }
 
 impl Opcode {
-    pub fn decode(raw: i32) -> Result<Opcode, ComputerError> {
-        match raw {
+    pub fn decode(raw: MemoryValue) -> Result<Opcode, ComputerError> {
+        match raw % 100 {
             1 => Ok(Opcode::Add),
             2 => Ok(Opcode::Multiply),
+            3 => Ok(Opcode::Input),
+            4 => Ok(Opcode::Output),
             99 => Ok(Opcode::Halt),
             _ => Err(ComputerError::UnknownOpcode),
         }
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstructionHeader {
+    opcode: Opcode,
+    parameter_modes: Vec<ParameterMode>,
+}
+
+impl InstructionHeader {
+    pub fn decode(raw: MemoryValue) -> Result<InstructionHeader, ComputerError> {
+        Ok(InstructionHeader {
+            opcode: Opcode::decode(raw)?,
+            parameter_modes: ParameterMode::decode_all(raw / 100)?,
+        })
+    }
+
+    pub fn get_mode_of_parameter(&self, n: usize) -> ParameterMode {
+        *self.parameter_modes.iter().nth(n).unwrap_or(&ParameterMode::Position)
+    }
+
+    pub fn wrap_parameter(&self, n: usize, value: MemoryValue) -> Parameter {
+        match self.get_mode_of_parameter(n) {
+            ParameterMode::Position => Parameter::Position(value as Address),
+            ParameterMode::Immediate => Parameter::Immediate(value),
+        }
+    }
+
+    pub fn wrap_parameters<I: Iterator<Item=MemoryValue>>(&self, stream: &mut I, n: usize) -> Result<Vec<Parameter>, ComputerError> {
+        Ok(Instruction::next_n_values(stream, n)?
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| self.wrap_parameter(index, value))
+            .collect())
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Parameter {
+    Position(Address),
+    Immediate(MemoryValue),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Instruction {
-    Add(usize, usize, usize),
-    Multiply(usize, usize, usize),
+    Add(Parameter, Parameter, Parameter),
+    Multiply(Parameter, Parameter, Parameter),
+    Input(Parameter),
+    Output(Parameter),
     Halt,
 }
 
 pub struct ExecuteResult {
-    advance_by: usize,
+    advance_by: Address,
 }
 
 impl Instruction {
-    pub fn decode<I: Iterator<Item=i32>>(instruction_stream: &mut I) -> Result<Instruction, ComputerError> {
-        let opcode = match instruction_stream.next() {
-            Some(raw_opcode) => Opcode::decode(raw_opcode)?,
+    pub fn decode<I: Iterator<Item=MemoryValue>>(instruction_stream: &mut I) -> Result<Instruction, ComputerError> {
+        let header = match instruction_stream.next() {
+            Some(raw_opcode) => InstructionHeader::decode(raw_opcode)?,
             None => return Err(ComputerError::InstructionDecodeFailed),
         };
 
-        let instruction = match opcode {
-            Opcode::Add => {
-                let values = Instruction::next_n_values(instruction_stream, 3)?;
-                Instruction::Add(values[0] as usize, values[1] as usize, values[2] as usize)
-            }
-            Opcode::Multiply => {
-                let values = Instruction::next_n_values(instruction_stream, 3)?;
-                Instruction::Multiply(values[0] as usize, values[1] as usize, values[2] as usize)
-            }
-            Opcode::Halt => Instruction::Halt,
+        let instruction = match header {
+            InstructionHeader { opcode: Opcode::Add, .. } => {
+                let parameters = header.wrap_parameters(instruction_stream, 3)?;
+                Instruction::Add(
+                    parameters[0],
+                    parameters[1],
+                    parameters[2]
+                )
+            },
+            InstructionHeader { opcode: Opcode::Multiply, .. } => {
+                let parameters = header.wrap_parameters(instruction_stream, 3)?;
+                Instruction::Multiply(
+                    parameters[0],
+                    parameters[1],
+                    parameters[2]
+                )
+            },
+            InstructionHeader { opcode: Opcode::Input, .. } => {
+                let parameters = header.wrap_parameters(instruction_stream, 1)?;
+                Instruction::Input(
+                    parameters[0]
+                )
+            },
+            InstructionHeader { opcode: Opcode::Output, .. } => {
+                let parameters = header.wrap_parameters(instruction_stream, 1)?;
+                Instruction::Output(
+                    parameters[0]
+                )
+            },
+            InstructionHeader { opcode: Opcode::Halt, .. } => Instruction::Halt,
         };
 
         Ok(instruction)
     }
 
-    fn next_n_values<I: Iterator<Item=i32>>(stream: &mut I, n: usize) -> Result<Vec<i32>, ComputerError> {
+    fn next_n_values<I: Iterator<Item=MemoryValue>>(stream: &mut I, n: usize) -> Result<Vec<MemoryValue>, ComputerError> {
         let result = stream.take(n).collect::<Vec<_>>();
         if result.len() < n {
             Err(ComputerError::InstructionDecodeFailed)
@@ -130,7 +231,7 @@ impl Instruction {
 }
 
 pub struct Computer<'a, M: Memory> {
-    instruction_pointer: usize,
+    instruction_pointer: Address,
     cycle_count: usize,
     pub halted: bool,
     memory: &'a mut M,
@@ -163,28 +264,60 @@ impl<'a, M: Memory> Computer<'a, M> {
     fn execute(&mut self, instruction: Instruction) -> Result<ExecuteResult, ComputerError> {
         let advance_by = match instruction {
             Instruction::Add(a, b, result) => {
-                self.memory.write_slot(result, self.memory.read_slot(a)? + self.memory.read_slot(b)?)?;
+                self.perform_write(result, self.perform_read(a)? + self.perform_read(b)?)?;
                 4
-            }
+            },
             Instruction::Multiply(a, b, result) => {
-                self.memory.write_slot(result, self.memory.read_slot(a)? * self.memory.read_slot(b)?)?;
+                self.perform_write(result, self.perform_read(a)? * self.perform_read(b)?)?;
                 4
-            }
+            },
+            Instruction::Input(destination) => {
+                let mut user_input = String::new();
+                print!("  INPUT> ");
+                stdout().flush().map_err(|_| ComputerError::FailedToGetInput)?;
+                stdin().read_line(&mut user_input)
+                    .map_err(|_| ComputerError::FailedToGetInput)?;
+                user_input = user_input.trim().into();
+                let value = user_input.parse::<MemoryValue>()
+                    .map_err(|_| ComputerError::FailedToGetInput)?;
+                println!("  (as value: {})", value);
+                self.perform_write(destination, value)?;
+                2
+            },
+            Instruction::Output(source) => {
+                let value = self.perform_read(source)?;
+                println!("  OUTPUT VALUE: {}", value);
+                2
+            },
             Instruction::Halt => {
                 self.halted = true;
                 0
-            }
+            },
         };
 
         Ok(ExecuteResult {
             advance_by,
         })
     }
+
+    fn perform_read(&self, source: Parameter) -> Result<MemoryValue, ComputerError> {
+        match source {
+            Parameter::Position(address) => self.memory.read_slot(address),
+            Parameter::Immediate(value) => Ok(value),
+        }
+    }
+
+    fn perform_write(&mut self, destination: Parameter, value: MemoryValue) -> Result<(), ComputerError> {
+        match destination {
+            Parameter::Position(address) => self.memory.write_slot(address, value),
+            Parameter::Immediate(_) => Err(ComputerError::WriteParameterCannotBeImmediateMode),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::intcode::{Computer, SimpleMemory, Memory, Instruction, ComputerError};
+    use crate::intcode::{Computer, SimpleMemory, Memory, Instruction, ComputerError, Parameter};
 
     #[test]
     fn can_read_memory() {
@@ -217,7 +350,11 @@ mod tests {
         let memory = SimpleMemory::from_literal(&[1, 2, 3, 4]);
         let mut stream = memory.read_stream_from(0).unwrap();
         let result = Instruction::decode(&mut stream);
-        assert_eq!(result, Ok(Instruction::Add(2, 3, 4)));
+        assert_eq!(result, Ok(Instruction::Add(
+            Parameter::Position(2),
+            Parameter::Position(3),
+            Parameter::Position(4)
+        )));
     }
 
     #[test]
@@ -225,7 +362,11 @@ mod tests {
         let memory = SimpleMemory::from_literal(&[2, 4, 8, 10]);
         let mut stream = memory.read_stream_from(0).unwrap();
         let result = Instruction::decode(&mut stream);
-        assert_eq!(result, Ok(Instruction::Multiply(4, 8, 10)));
+        assert_eq!(result, Ok(Instruction::Multiply(
+            Parameter::Position(4),
+            Parameter::Position(8),
+            Parameter::Position(10)
+        )));
     }
 
     #[test]
