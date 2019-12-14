@@ -370,6 +370,45 @@ mod tests {
     }
 
     #[test]
+    fn validate_position_and_immediate_parameters() {
+        let memory = SimpleMemory::from_literal(&[101, 2, 3, 4]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::Add(
+            Parameter::Immediate(2),
+            Parameter::Position(3),
+            Parameter::Position(4)
+        )));
+
+        let memory = SimpleMemory::from_literal(&[1001, 2, 3, 4]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::Add(
+            Parameter::Position(2),
+            Parameter::Immediate(3),
+            Parameter::Position(4)
+        )));
+
+        let memory = SimpleMemory::from_literal(&[10001, 2, 3, 4]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::Add(
+            Parameter::Position(2),
+            Parameter::Position(3),
+            Parameter::Immediate(4)
+        )));
+
+        let memory = SimpleMemory::from_literal(&[10002, 2, 3, 4]);
+        let mut stream = memory.read_stream_from(0).unwrap();
+        let result = Instruction::decode(&mut stream);
+        assert_eq!(result, Ok(Instruction::Multiply(
+            Parameter::Position(2),
+            Parameter::Position(3),
+            Parameter::Immediate(4)
+        )));
+    }
+
+    #[test]
     fn can_decode_halt() {
         let memory = SimpleMemory::from_literal(&[99]);
         let mut stream = memory.read_stream_from(0).unwrap();
